@@ -3,6 +3,10 @@
 from typing import Dict, Any
 from datetime import datetime
 
+# Markers for auto-generated section
+AUTO_START = "<!-- CCK:AUTO-START -->"
+AUTO_END = "<!-- CCK:AUTO-END -->"
+
 
 def generate_claude_md(context: Dict[str, Any]) -> str:
     """Generate CLAUDE.md content from scanned context.
@@ -12,6 +16,9 @@ def generate_claude_md(context: Dict[str, Any]) -> str:
     - What doesn't work: Abstract descriptions, outdated commands, too much detail
     """
     sections = []
+
+    # Auto-generated section marker
+    sections.append(AUTO_START)
 
     # Header
     sections.append(_generate_header(context))
@@ -37,6 +44,9 @@ def generate_claude_md(context: Dict[str, Any]) -> str:
 
     # Footer
     sections.append(_generate_footer())
+
+    # Auto-generated section end marker
+    sections.append(AUTO_END)
 
     return '\n\n'.join(sections)
 
