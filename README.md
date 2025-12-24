@@ -171,6 +171,10 @@ Built from insights across 300+ Claude Code sessions:
 - Outdated commands
 - Too much detail
 
+## More Tools
+
+See all dev tools: https://takawasi-social.com/en/
+
 ## License
 
 MIT
