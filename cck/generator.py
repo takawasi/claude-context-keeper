@@ -133,3 +133,31 @@ def _generate_footer() -> str:
 - Check Conventions for style guidelines
 
 *This file is auto-generated. Manual edits may be overwritten.*"""
+
+
+def generate_brief_context(context: Dict[str, Any]) -> str:
+    """Generate brief context for per-turn reminders (UserPromptSubmit hook).
+
+    Designed to be concise to minimize token usage on every turn.
+    """
+    lines = []
+
+    name = context.get('project_name', 'Project')
+    ptype = context.get('project_type', 'unknown')
+    langs = context.get('languages', [])
+
+    lines.append(f"[CCK] {name} ({ptype})")
+
+    if langs:
+        lines.append(f"Languages: {', '.join(langs)}")
+
+    if context.get('entry_points'):
+        lines.append(f"Entry: {', '.join(context['entry_points'][:3])}")
+
+    if context.get('build_commands'):
+        # Show first 2 commands only
+        cmds = [c for c in context['build_commands'][:2] if '(' not in c]
+        if cmds:
+            lines.append(f"Commands: {'; '.join(cmds)}")
+
+    return '\n'.join(lines)

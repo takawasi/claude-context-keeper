@@ -42,9 +42,27 @@ cck sync --dry-run
 
 # Custom output path
 cck sync --output context.md
+```
 
-# Append to existing CLAUDE.md
-cck sync --append
+User-written content outside the auto-generated markers is preserved:
+```markdown
+# My custom header (preserved)
+
+<!-- CCK:AUTO-START -->
+... auto-generated content ...
+<!-- CCK:AUTO-END -->
+
+## My custom section (preserved)
+```
+
+### Watch Mode
+
+```bash
+# Auto-update CLAUDE.md when files change
+cck watch
+
+# Watch with custom interval
+cck watch --interval 60
 ```
 
 ### Info Command
@@ -111,6 +129,33 @@ make build
 - Ruff/Black configured
 - snake_case file naming
 ```
+
+## Per-Turn Context (UserPromptSubmit Hook)
+
+Want context injected every turn instead of just session start?
+
+```bash
+# Install hook for current project
+cck hook install
+
+# Install globally for all projects
+cck hook install --global
+
+# Check status
+cck hook status
+
+# Preview what would be injected
+cck hook test
+
+# Remove hook
+cck hook remove
+```
+
+**CLAUDE.md vs Hook:**
+| Approach | When context loads | Best for |
+|----------|-------------------|----------|
+| `cck sync` | Session start only | Most projects |
+| `cck hook install` | Every turn | Long sessions, complex rules |
 
 ## Design Principles
 
