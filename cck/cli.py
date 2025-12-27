@@ -3,9 +3,18 @@
 import click
 from pathlib import Path
 from rich.console import Console
+from rich.prompt import Prompt, Confirm
 
 from .scanner import scan_project
 from .generator import generate_claude_md, generate_brief_context, AUTO_START, AUTO_END
+from .config import (
+    load_config, save_config, find_config_path,
+    CONFIG_TEMPLATE_MINIMAL, CONFIG_TEMPLATE_CB_STYLE
+)
+from .history import (
+    init_db, get_combined_history, format_history_compact, format_history_detailed,
+    log_file_change, cleanup_old_entries
+)
 
 console = Console()
 
@@ -57,6 +66,97 @@ def main():
     Stop re-explaining your codebase every session.
     """
     pass
+
+
+@main.command()
+@click.option('--minimal', is_flag=True, help='Use minimal config (just reminder.md)')
+@click.option('--cb-style', is_flag=True, help='Use CB-style config (file watching + history)')
+@click.option('--non-interactive', is_flag=True, help='Skip prompts, use defaults')
+def setup(minimal: bool, cb_style: bool, non_interactive: bool):
+    """Interactive setup for CCK configuration.
+
+    Creates .claude/cck.yaml with your preferred settings.
+    Claude Code can call this to configure monitoring.
+
+    Examples:
+
+        cck setup                # Interactive setup
+        cck setup --minimal      # Quick setup with reminder.md only
+        cck setup --cb-style     # Full workflow with file watching + history
+    """
+    project_path = Path.cwd()
+
+    # Check for existing config
+    existing = find_config_path(project_path)
+    if existing:
+        console.print(f"[yellow]Config already exists:[/] {existing}")
+        if not non_interactive:
+            if not Confirm.ask("Overwrite?", default=False):
+                console.print("[dim]Aborted[/dim]")
+                return
+
+    # Determine config template
+    if minimal:
+        config_content = CONFIG_TEMPLATE_MINIMAL
+        mode = "minimal"
+    elif cb_style:
+        config_content = CONFIG_TEMPLATE_CB_STYLE
+        mode = "CB-style"
+    elif non_interactive:
+        config_content = CONFIG_TEMPLATE_MINIMAL
+        mode = "minimal (default)"
+    else:
+        # Interactive mode
+        console.print("\n[bold]CCK Setup[/bold]\n")
+        console.print("Choose a configuration style:\n")
+        console.print("  [1] Minimal - Just reminder.md, you write what to inject")
+        console.print("  [2] CB-style - File watching + operation history (recommended)")
+        console.print("")
+
+        choice = Prompt.ask("Select", choices=["1", "2"], default="2")
+
+        if choice == "1":
+            config_content = CONFIG_TEMPLATE_MINIMAL
+            mode = "minimal"
+        else:
+            config_content = CONFIG_TEMPLATE_CB_STYLE
+            mode = "CB-style"
+
+            # Additional CB-style options
+            console.print("\n[bold]CB-style options:[/bold]")
+
+            watch_paths = Prompt.ask(
+                "Watch paths (comma-separated)",
+                default="."
+            )
+            history_limit = Prompt.ask(
+                "History entries to show in reminder",
+                default="20"
+            )
+
+            # Update config with user choices
+            config_content = config_content.replace(
+                "    - .  # Monitor entire project",
+                "\n".join(f"    - {p.strip()}" for p in watch_paths.split(","))
+            )
+            config_content = config_content.replace(
+                "history_limit: 20",
+                f"history_limit: {history_limit}"
+            )
+
+    # Save config
+    config_path = save_config(project_path, config_content)
+    console.print(f"\n[bold green]Config created:[/] {config_path}")
+    console.print(f"[dim]Mode: {mode}[/dim]")
+
+    # Next steps
+    console.print("\n[bold]Next steps:[/bold]")
+    if "CB-style" in mode:
+        console.print("  1. Start file watcher: [cyan]cck watch --with-history[/cyan]")
+        console.print("  2. Install hook: [cyan]cck hook install --use-history[/cyan]")
+    else:
+        console.print("  1. Edit reminder: [cyan]cck reminder init[/cyan]")
+        console.print("  2. Install hook: [cyan]cck hook install --use-reminder[/cyan]")
 
 
 @main.command()
@@ -130,7 +230,9 @@ def info(path: str):
               help='Output file path (default: CLAUDE.md)')
 @click.option('--interval', type=int, default=30,
               help='Check interval in seconds (default: 30)')
-def watch(path: str, output: str, interval: int):
+@click.option('--with-history', is_flag=True,
+              help='Record file changes to history database')
+def watch(path: str, output: str, interval: int, with_history: bool):
     """Watch for changes and auto-sync CLAUDE.md.
 
     User-written content outside the auto-generated markers is preserved.
@@ -140,6 +242,7 @@ def watch(path: str, output: str, interval: int):
         cck watch                    # Watch current dir
         cck watch ./myproject        # Watch specific dir
         cck watch --interval 60      # Check every 60 seconds
+        cck watch --with-history     # Also record changes to history DB
     """
     import time
     import hashlib
@@ -147,36 +250,86 @@ def watch(path: str, output: str, interval: int):
     project_path = Path(path).resolve()
     output_path = project_path / output if not Path(output).is_absolute() else Path(output)
 
+    # Load config and init history DB if needed
+    config = load_config(project_path)
+    db_conn = None
+    if with_history:
+        db_path = project_path / config['history']['db_path']
+        db_conn = init_db(db_path)
+        console.print(f"[dim]History DB: {db_path}[/dim]")
+
     console.print(f"[bold blue]Watching:[/] {project_path}")
     console.print(f"[dim]Interval: {interval}s, Output: {output_path}[/dim]")
+    if with_history:
+        console.print("[dim]Recording file changes to history[/dim]")
     console.print("[dim]Press Ctrl+C to stop[/dim]\n")
 
-    def get_dir_hash(p: Path) -> str:
-        """Get hash of directory state (file names + mtimes)."""
-        items = []
-        ignore = {'.git', '__pycache__', 'node_modules', '.venv', 'venv'}
+    # Get exclude patterns from config
+    exclude_patterns = set(config['watch']['exclude'])
+
+    def should_ignore(filepath: Path) -> bool:
+        """Check if file should be ignored."""
+        for pattern in exclude_patterns:
+            if pattern in filepath.parts or str(filepath).endswith(pattern):
+                return True
+        return False
+
+    def get_file_states(p: Path) -> dict:
+        """Get dict of file paths to mtimes."""
+        states = {}
         try:
-            for f in sorted(p.rglob('*')):
-                if any(i in f.parts for i in ignore):
+            for f in p.rglob('*'):
+                if should_ignore(f):
                     continue
                 if f.is_file():
-                    items.append(f"{f}:{f.stat().st_mtime}")
+                    rel_path = str(f.relative_to(p))
+                    states[rel_path] = f.stat().st_mtime
         except Exception:
             pass
-        return hashlib.md5('|'.join(items).encode()).hexdigest()
+        return states
 
-    last_hash = ""
+    last_states = {}
 
     try:
         while True:
-            current_hash = get_dir_hash(project_path)
+            current_states = get_file_states(project_path)
 
-            if current_hash != last_hash:
-                console.print(f"[yellow]Change detected, syncing...[/yellow]")
+            # Detect changes
+            changes = []
+            for path_str, mtime in current_states.items():
+                if path_str not in last_states:
+                    changes.append(('created', path_str))
+                elif last_states[path_str] != mtime:
+                    changes.append(('modified', path_str))
+
+            for path_str in last_states:
+                if path_str not in current_states:
+                    changes.append(('deleted', path_str))
+
+            if changes:
+                console.print(f"[yellow]Changes detected: {len(changes)} files[/yellow]")
+
+                # Record to history DB
+                if db_conn:
+                    for event_type, file_path in changes:
+                        snippet = None
+                        if event_type != 'deleted':
+                            try:
+                                full_path = project_path / file_path
+                                with open(full_path) as f:
+                                    snippet = f.read(200)
+                            except Exception:
+                                pass
+                        log_file_change(db_conn, event_type, file_path, snippet)
+                        console.print(f"  [dim]{event_type}: {file_path}[/dim]")
+
+                    # Cleanup old entries
+                    cleanup_old_entries(db_conn, config['history']['max_entries'])
+
+                # Sync CLAUDE.md
                 context = scan_project(project_path)
                 new_content = generate_claude_md(context)
 
-                # Preserve user content outside markers
                 existing_content = ""
                 if output_path.exists():
                     existing_content = output_path.read_text()
@@ -184,7 +337,7 @@ def watch(path: str, output: str, interval: int):
 
                 output_path.write_text(final_content)
                 console.print(f"[green]Synced:[/] {output_path}")
-                last_hash = current_hash
+                last_states = current_states
 
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -312,6 +465,74 @@ if __name__ == "__main__":
         pass  # Fail silently to not break Claude Code
 '''
 
+# Hook script template (history mode - reads from SQLite DB)
+HOOK_SCRIPT_HISTORY = '''#!/usr/bin/env python3
+"""CCK User Prompt Submit Hook - Reads history from SQLite database.
+
+Generated by: cck hook install --use-history
+Docs: https://github.com/takawasi/claude-context-keeper
+
+This hook reads file change history from .claude/cck_history.sqlite
+and outputs recent operations for context injection each turn.
+
+Requires: cck watch --with-history running in background
+"""
+import sys
+import sqlite3
+from pathlib import Path
+
+def find_project_root() -> Path:
+    """Find project root by looking for common markers."""
+    cwd = Path.cwd()
+    markers = ['.git', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod']
+    for p in [cwd] + list(cwd.parents):
+        if any((p / m).exists() for m in markers):
+            return p
+    return cwd
+
+def get_history(root: Path, limit: int = 20) -> str:
+    """Read history from SQLite database."""
+    db_path = root / '.claude' / 'cck_history.sqlite'
+
+    if not db_path.exists():
+        return f"[CCK] {root.name} - No history DB (run: cck watch --with-history)"
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        # Get recent file changes
+        cursor = conn.execute(
+            'SELECT timestamp, event_type, file_path FROM file_changes ORDER BY timestamp DESC LIMIT ?',
+            (limit,)
+        )
+        changes = cursor.fetchall()
+        conn.close()
+
+        if not changes:
+            return f"[CCK] {root.name} - No recent changes"
+
+        lines = [f"[CCK] {root.name} - Recent changes:"]
+        event_map = {'created': '+', 'modified': '~', 'deleted': '-'}
+        for row in changes:
+            ts = row['timestamp'][11:19]  # HH:MM:SS
+            symbol = event_map.get(row['event_type'], '?')
+            lines.append(f"  {ts} {symbol} {row['file_path']}")
+
+        return '\\n'.join(lines)
+
+    except Exception as e:
+        return f"[CCK] {root.name} - History error: {e}"
+
+if __name__ == "__main__":
+    try:
+        root = find_project_root()
+        history = get_history(root)
+        sys.stdout.write(history)
+    except Exception:
+        pass  # Fail silently to not break Claude Code
+'''
+
 
 @main.group()
 def hook():
@@ -327,19 +548,23 @@ def hook():
               help='Install to ~/.claude/hooks (applies to all projects)')
 @click.option('--use-reminder', is_flag=True,
               help='Use reminder.md mode instead of auto-detect')
-def hook_install(is_global: bool, use_reminder: bool):
+@click.option('--use-history', is_flag=True,
+              help='Use history mode (reads from SQLite DB)')
+def hook_install(is_global: bool, use_reminder: bool, use_history: bool):
     """Install CCK hook for UserPromptSubmit.
 
     This injects brief project context on every turn, not just session start.
 
-    Two modes available:
+    Three modes available:
     - Default: Auto-detects project type and generates context
     - --use-reminder: Reads from .claude/reminder.md (fully customizable)
+    - --use-history: Reads file change history from SQLite (CB-style)
 
     Examples:
 
         cck hook install                  # Auto-detect mode
         cck hook install --use-reminder   # Read reminder.md
+        cck hook install --use-history    # Read from history DB (CB-style)
         cck hook install --global         # Install to ~/.claude/hooks
     """
     if is_global:
@@ -356,7 +581,10 @@ def hook_install(is_global: bool, use_reminder: bool):
         return
 
     # Choose script based on mode
-    if use_reminder:
+    if use_history:
+        hook_path.write_text(HOOK_SCRIPT_HISTORY)
+        mode_desc = "history mode (SQLite DB)"
+    elif use_reminder:
         hook_path.write_text(HOOK_SCRIPT_REMINDER)
         mode_desc = "reminder.md mode"
     else:
@@ -368,7 +596,9 @@ def hook_install(is_global: bool, use_reminder: bool):
     console.print(f"[bold green]Hook installed:[/] {hook_path}")
     console.print(f"[dim]Mode: {mode_desc}[/dim]")
 
-    if use_reminder:
+    if use_history:
+        console.print("[dim]Start file watcher: cck watch --with-history[/dim]")
+    elif use_reminder:
         console.print("[dim]Create .claude/reminder.md with 'cck reminder init'[/dim]")
 
 
