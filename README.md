@@ -134,9 +134,30 @@ make build
 
 Want context injected every turn instead of just session start?
 
+### Two Modes
+
+**1. Auto-detect mode** (default): Generates context from codebase analysis
 ```bash
-# Install hook for current project
 cck hook install
+```
+
+**2. Reminder.md mode**: You write exactly what gets injected
+```bash
+# Create customizable reminder.md
+cck reminder init
+
+# Install hook that reads reminder.md
+cck hook install --use-reminder
+```
+
+### Hook Commands
+
+```bash
+# Install hook (auto-detect mode)
+cck hook install
+
+# Install hook (reminder.md mode)
+cck hook install --use-reminder
 
 # Install globally for all projects
 cck hook install --global
@@ -146,16 +167,31 @@ cck hook status
 
 # Preview what would be injected
 cck hook test
+cck hook test --use-reminder
 
 # Remove hook
 cck hook remove
 ```
 
-**CLAUDE.md vs Hook:**
-| Approach | When context loads | Best for |
-|----------|-------------------|----------|
-| `cck sync` | Session start only | Most projects |
-| `cck hook install` | Every turn | Long sessions, complex rules |
+### Reminder.md Commands
+
+```bash
+# Create reminder.md template
+cck reminder init
+
+# Create in project root instead of .claude/
+cck reminder init --in-root
+
+# Show current reminder content
+cck reminder show
+```
+
+**Comparison:**
+| Approach | Context Source | Customization | Best for |
+|----------|---------------|---------------|----------|
+| `cck sync` | Auto-generated | Marker-based | Session start context |
+| `cck hook install` | Auto-generated | None | Simple per-turn reminders |
+| `cck hook install --use-reminder` | reminder.md | Full control | Complex rules, CB-style workflows |
 
 ## Design Principles
 
